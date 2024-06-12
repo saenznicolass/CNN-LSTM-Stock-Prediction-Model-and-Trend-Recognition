@@ -1,0 +1,1413 @@
+# ---
+# Dynamic Portfolio Backtesting Project Using CNN-LSTM Model
+# ---
+
+# 1. Introduction
+Stock market prediction is a critical and challenging task that involves forecasting future stock prices based on historical data. Traditional methods of stock market prediction often fall short due to the complexity and volatility of financial markets. However, advancements in machine learning and deep learning have opened new avenues for improving prediction accuracy. Machine learning has revolutionized the financial industry, offering tools to analyze vast amounts of data and predict market trends with unprecedented accuracy. By leveraging ML algorithms, traders can make more informed decisions, manage risks better, and optimize their strategies for higher returns. Predicting the direction of price movements is a critical task in finance, and machine learning models such as Long Short-Term Memory (LSTM) networks and Convolutional Neural Networks (CNN) have shown great promise in this domain.
+
+This project replicates and builds upon the methodology presented in the paper "Predicting Stock Market Time-Series Data Using CNN-LSTM Neural Network Model" by Aadhitya A, Rajapriya R, Vineetha R S, and Anurag M Bagde from the Madras Institute of Technology. My goal is to apply a CNN-LSTM model to predict stock market trends and dynamically backtest a portfolio using this model, corroboring this in another way the results presented in the paper.
+
+## 2. Background and Motivation
+The stock market is a pivotal component of the global economy, representing ownership claims in businesses. Predicting stock market performance is notoriously difficult due to the constant fluctuations in stock prices. The paper by Aadhitya et al. highlights the advantages of using a very specific CNN-LSTM model for stock market prediction. The CNN component excels at extracting features from time-series data, while the LSTM component is adept at capturing temporal dependencies and patterns. We will see that combining these two models leverages their strengths, resulting in improved prediction accuracy.
+
+# 3. Related Work
+Various machine learning and deep learning models have been explored for stock market prediction, including Random Forest, Linear Regression, RNN, LSTM, and hybrid models. While these models have shown varying degrees of success, they often fall short in terms of accuracy and robustness, especially when applied to real-time data. The CNN-LSTM model proposed by Aadhitya et al. combines the feature extraction capabilities of CNNs with the sequence prediction capabilities of LSTMs, providing a more effective approach for time-series prediction.
+
+# 4. Objective
+The primary objective of this project is to dynamically backtest a portfolio using a CNN-LSTM model. Specifically, I aim to:
+
+Predict future stock movement prices for various assets.
+Allocate portfolio weights dynamically based on volatility.
+Evaluate the performance of the portfolio using metrics such as cumulative returns, drawdown, and accuracy.
+
+# 5. Methodology
+Let's charge the libraries.
+```{r}
+# knitr::opts_chunk$set(echo = TRUE)
+
+suppressMessages(suppressWarnings(library(keras)))
+suppressMessages(suppressWarnings(library(tidyverse)))
+suppressMessages(suppressWarnings(library(reticulate)))
+suppressMessages(suppressWarnings(library(lubridate)))
+suppressMessages(suppressWarnings(library(ggplot2)))
+suppressMessages(suppressWarnings(library(gridExtra)))
+suppressMessages(suppressWarnings(library(Metrics)))
+suppressMessages(suppressWarnings(library(tune)))
+suppressMessages(suppressWarnings(library(rsample)))
+suppressMessages(suppressWarnings(library(tfruns)))
+suppressMessages(suppressWarnings(library(scales)))
+suppressMessages(suppressWarnings(library(PerformanceAnalytics)))
+suppressMessages(suppressWarnings(library(xts)))
+suppressMessages(suppressWarnings(library(zoo)))
+suppressMessages(suppressWarnings(library(mclust)))
+suppressMessages(suppressWarnings(library(dplyr)))
+suppressMessages(suppressWarnings(library(tidyr)))
+suppressMessages(suppressWarnings(library(kableExtra)))
+suppressMessages(suppressWarnings(library(ggcorrplot)))
+suppressMessages(suppressWarnings(library(tfdatasets)))
+suppressMessages(suppressWarnings(library(GGally)))
+
+
+# reticulate::py_install("keras-tuner")
+kt <- import("keras_tuner")
+```
+
+### 5.1 Data Collection and Preprocessing
+I collected historical data for four datasets: EUR/USD, BTC/USD, BTC/EUR, and NVDA. The data was sourced from the "The Historical Data Export widget" from Dukascopy Bank, a financial website that allows to download data already filtered without the weekends and cleaned. Even though, the datasets were prepossessed to handle missing values, normalize prices, and compute daily returns. The paper constructed the model under 10 years of daily data of IBM, so for purpose of diversity in the deployment of the model in this project I choose only these assets. And because the time it takes to execute the code, even thought we will not train the models in each dataset separately. I will explain the actual deployment i constructed for this paper latter in the corresponding section.  
+
+
+
+```{r}
+# Load datasets
+eur_usd <- read.csv("data/EURUSD_Candlestick_1_M_BID_21.12.2023-01.03.2024.csv")
+btc_usd <- read.csv("data/BTCUSD_Candlestick_1_M_BID_21.12.2023-01.03.2024.csv")
+btc_eur <- read.csv("data/BTCEUR_Candlestick_1_M_BID_21.12.2023-01.03.2024.csv")
+nvda <- read.csv("data/NVDA.USUSD_Candlestick_1_M_BID_21.12.2023-01.03.2024.csv")
+
+# Date column to POSIXct
+eur_usd$Date <- as.POSIXct(eur_usd$Date, format="%d.%m.%Y %H:%M:%S.%OS", tz="UTC")
+btc_usd$Date <- as.POSIXct(btc_usd$Date, format="%d.%m.%Y %H:%M:%S.%OS", tz="UTC")
+btc_eur$Date <- as.POSIXct(btc_eur$Date, format="%d.%m.%Y %H:%M:%S.%OS", tz="UTC")
+nvda$Date <- as.POSIXct(nvda$Date, format="%d.%m.%Y %H:%M:%S.%OS", tz="UTC")
+
+
+# Function to calculate returns per minute
+calculate_returns <- function(data) {
+  data <- data %>%
+    mutate(Daily_Return = (Close - lag(Close)) / lag(Close)) %>%
+    mutate(Daily_Return = ifelse(is.na(Daily_Return), 0, Daily_Return))  # Replace NA returns with 0
+  return(data)
+}
+
+# Calculate returns for each dataset
+eur_usd <- calculate_returns(eur_usd)
+btc_usd <- calculate_returns(btc_usd)
+btc_eur <- calculate_returns(btc_eur)
+nvda <- calculate_returns(nvda)
+
+```
+
+# 5.1.2 Data Scaling and Merging
+To facilitate comparison and analysis I scale the closing prices of each dataset to a 0-1 range. then merge the datasets based on the Date column creating a combined dataset that includes scaled closing prices and daily returns for all assets.
+
+```{r}
+
+# Function to scale the Close prices
+scale_close <- function(data) {
+  data %>%
+    mutate(Scaled_Close = (Close - min(Close, na.rm = TRUE)) / (max(Close, na.rm = TRUE) - min(Close, na.rm = TRUE)))
+}
+
+# Scale Close prices
+eur_usd <- scale_close(eur_usd)
+btc_usd <- scale_close(btc_usd)
+btc_eur <- scale_close(btc_eur)
+nvda <- scale_close(nvda)
+
+# Merge datasets on Date
+merged_data <- full_join(eur_usd %>% select(Date, EUR_USD_Close = Scaled_Close, EUR_USD_Return = Daily_Return), 
+                         btc_usd %>% select(Date, BTC_USD_Close = Scaled_Close, BTC_USD_Return = Daily_Return), by = "Date") %>%
+  full_join(btc_eur %>% select(Date, BTC_EUR_Close = Scaled_Close, BTC_EUR_Return = Daily_Return), by = "Date") %>%
+  full_join(nvda %>% select(Date, NVDA_Close = Scaled_Close, NVDA_Return = Daily_Return), by = "Date")
+
+# Melt data for ggplot
+combined_data_long <- merged_data %>%
+  pivot_longer(cols = -Date, names_to = "variable", values_to = "value")
+
+```
+
+### 5.1.3 Short Exploratory Data Analysis
+I perform a short exploratory data analysis to understand the behavior of the data. This includes creating plots to visualize the scaled closing prices and minute returns for all assets. I also generate combined histograms to show the distribution of minute returns for each asset. The histograms below show the frequency of daily returns for EUR/USD, BTC/USD, BTC/EUR, and NVDA
+
+```{r}
+# Plot scaled Close prices
+plot1 <- ggplot(combined_data_long %>% filter(grepl("Close", variable)), aes(x = Date, y = value, color = variable)) +
+  geom_line() +
+  labs(title = "Scaled Closing Prices", x = "Date", y = "Scaled Close") +
+  theme_minimal()
+
+# Plot daily returns
+plot2 <- ggplot(combined_data_long %>% filter(grepl("Return", variable)), aes(x = Date, y = value, color = variable)) +
+  geom_line() +
+  labs(title = "Daily Returns", x = "Date", y = "Daily Return") +
+  theme_minimal()
+
+# Function to create distribution plots
+create_distribution_plot <- function(data, title) {
+  ggplot(data, aes(x = Daily_Return)) +
+    geom_histogram(bins = 500, fill = 'green', color = 'black') +
+    labs(title = title, x = "Daily Return", y = "Frequency") +
+    theme_minimal()
+}
+
+# Distribution plots for non-normalized returns
+plot3 <- create_distribution_plot(eur_usd, "Distribution of EUR/USD Returns")
+plot4 <- create_distribution_plot(btc_usd, "Distribution of BTC/USD Returns")
+plot5 <- create_distribution_plot(btc_eur, "Distribution of BTC/EUR Returns")
+plot6 <- create_distribution_plot(nvda, "Distribution of NVDA Returns")
+
+# Distribution plots combined
+grid.arrange(plot3, plot4, plot5, plot6, ncol = 2, nrow = 2)
+
+```
+
+### 5.1.4 Normalized Distribution Plots
+To further analyze the return distributions, Ie create normalized distribution plots and a density plot to visualize the distribution of normalized returns for all datasets combined. This allows us to compare the return distributions of different assets on a common scale. It is clear the returns for EURUSD are overwhelm different from the others, this given its nature and its liquidity. It is better to look at the fisr plot to better understand the scale of returns.
+
+```{r}
+
+# Function to create normalized distribution plots
+create_normalized_distribution_plot <- function(data, title) {
+  data %>%
+    mutate(Normalized_Return = (Daily_Return - mean(Daily_Return, na.rm = TRUE)) / sd(Daily_Return, na.rm = TRUE)) %>%
+    ggplot(aes(x = Normalized_Return)) +
+    geom_histogram(aes(y = ..density..), bins = 500, fill = 'blue', color = 'black') +
+    labs(title = title, x = "Normalized Daily Return", y = "Density") +
+    theme_minimal()
+}
+
+# Normalized distribution plots
+plot7 <- create_normalized_distribution_plot(eur_usd, "Normalized Distribution of EUR/USD Returns")
+plot8 <- create_normalized_distribution_plot(btc_usd, "Normalized Distribution of BTC/USD Returns")
+plot9 <- create_normalized_distribution_plot(btc_eur, "Normalized Distribution of BTC/EUR Returns")
+plot10 <- create_normalized_distribution_plot(nvda, "Normalized Distribution of NVDA Returns")
+
+# Normalized distribution plots combined into one plot
+grid.arrange(plot7, plot8, plot9, plot10, ncol = 2, nrow = 2)
+
+# Dnsity plot of normalized returns for all datasets
+combined_normalized_returns <- merged_data %>%
+  select(Date, EUR_USD_Return, BTC_USD_Return, BTC_EUR_Return, NVDA_Return) %>%
+  pivot_longer(cols = -Date, names_to = "variable", values_to = "Daily_Return") %>%
+  mutate(Normalized_Return = (Daily_Return - mean(Daily_Return, na.rm = TRUE)) / sd(Daily_Return, na.rm = TRUE))
+
+density_plot <- ggplot(combined_normalized_returns, aes(x = Normalized_Return, fill = variable)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Density Plot of Normalized Daily Returns", x = "Normalized Daily Return", y = "Density") +
+  theme_minimal()
+
+print(density_plot)
+```
+### 5..1.5 Correlation Analysis
+
+I compute the correlation matrix of daily returns for all datasets to understand the relationships between the returns of different assets. The correlation matrix is then visualized using a heatmap. Additionally, we perform correlation tests to quantify the strength and significance of the linear relationships between the returns of different asset pairs.
+```{r results = 'asis'}
+# Calculate and plot correlation matrix
+returns_data <- merged_data %>% select(Date, EUR_USD_Return, BTC_USD_Return, BTC_EUR_Return, NVDA_Return)
+correlation_matrix <- cor(returns_data %>% select(-Date), use = "complete.obs")
+
+corr_plot <- ggcorrplot(correlation_matrix, hc.order = TRUE, type = "lower",
+                        lab = TRUE, lab_size = 3, method="circle", 
+                        colors = c("tomato2", "white", "springgreen3"), 
+                        title="Correlation Matrix of Daily Returns",
+                        ggtheme=theme_bw)
+
+print(corr_plot)
+
+# Perform correlation tests
+correlation_tests <- list(
+  EUR_USD_vs_BTC_USD = cor.test(returns_data$EUR_USD_Return, returns_data$BTC_USD_Return),
+  EUR_USD_vs_BTC_EUR = cor.test(returns_data$EUR_USD_Return, returns_data$BTC_EUR_Return),
+  EUR_USD_vs_NVDA = cor.test(returns_data$EUR_USD_Return, returns_data$NVDA_Return),
+  BTC_USD_vs_BTC_EUR = cor.test(returns_data$BTC_USD_Return, returns_data$BTC_EUR_Return),
+  BTC_USD_vs_NVDA = cor.test(returns_data$BTC_USD_Return, returns_data$NVDA_Return),
+  BTC_EUR_vs_NVDA = cor.test(returns_data$BTC_EUR_Return, returns_data$NVDA_Return)
+)
+
+# Previous results in a dataframe
+format_correlation_test <- function(test) {
+  data.frame(
+    Statistic = c("t-value", "df", "p-value", "95% CI Lower", "95% CI Upper", "Correlation"),
+    Value = c(test$statistic, test$parameter, test$p.value, test$conf.int[1], test$conf.int[2], test$estimate)
+  )
+}
+
+# Tables for each correlation test
+correlation_tables <- lapply(correlation_tests, format_correlation_test)
+
+# Print each table
+for (test_name in names(correlation_tables)) {
+  cat(paste("\n#### Correlation test results for", test_name, ":\n"))
+  print(
+    kable(correlation_tables[[test_name]]) %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+  )
+}
+
+```
+
+#### Some interpretations:
+
+1. **EUR_USD vs. BTC_USD:**
+   The correlation between is positive but very low at 0.0727. The p-value indicates that this correlation is statistically significant. However, the small magnitude suggests that the returns of these two assets move independently of each other, with very little linear relationship.
+
+2. **EUR_USD vs. BTC_EUR:**
+  The correlation is slightly negative at -0.0528 and statistically significant. This suggests that there is a small inverse relationship between the returns of these two asset pairs, indicating that when one increases, the other slightly tends to decrease.
+
+3. **EUR_USD vs. NVDA:**
+  The correlation is positive and slightly higher at 0.1006. The p-value indicates that this correlation is also statistically significant. The low magnitude of correlation suggests a weak relationship between these returns.
+
+4. **BTC_USD vs. BTC_EUR:**
+   The correlation is very high at 0.9224, indicating a strong positive relationship. This is expected as both pairs involve Bitcoin and their returns move in tandem, reflecting their inherent connection to Bitcoin’s market dynamics.
+
+5. **BTC_USD vs. NVDA:**
+   The correlation is positive but very low at 0.0581. This weak correlation suggests that the returns of Bitcoin in USD and NVDA stocks do not have a strong linear relationship, which might be due to their different market drivers.
+
+6. **BTC_EUR vs. NVDA:**
+   The correlation is positive but very low at 0.0396. The low magnitude indicates that these assets' returns are largely independent of each other, with little to no linear relationship.
+
+#### General Comments based on this aggregate results:
+
+- **Statistical Significance vs. Practical Significance:**
+  Although most correlations are statistically significant (indicated by extremely low p-values), their practical significance is minimal due to the very low correlation values, except for BTC/USD and BTC/EUR.
+  
+- **Diversification Insight:**
+  The low correlations between the cryptocurrency pairs (BTC/USD and BTC/EUR) with EUR/USD and NVDA suggest that these assets can offer diversification benefits in a portfolio. Their returns are largely independent, which helps in risk reduction through diversification.
+  
+- **Market Dynamics:**
+  The strong correlation between BTC/USD and BTC/EUR reflects the intrinsic market dynamics of Bitcoin, irrespective of the currency pair. The weak correlations with traditional assets like EUR/USD and NVDA highlight the distinct market behaviors and influences on cryptocurrencies versus traditional forex and equities.
+
+- **Investment Strategy:**
+  Investors looking for diversification may consider combining assets with low correlations to optimize their portfolios. The high correlation between BTC/USD and BTC/EUR suggests treating them almost as a single asset in portfolio construction, while EUR/USD and NVDA can be viewed as separate entities with their market behaviors.
+
+In conclusion, the correlation analysis reveals crucial insights into the relationships between different asset pairs. It underscores the importance of understanding both statistical significance and practical implications in financial analysis and investment strategy formulation.
+
+### 5.1.6 Combined Plots of Scaled Prices and Returns
+Finally, we create combined plots to visualize both the scaled closing prices and daily returns together. This provides a comprehensive view of the price movements and return behaviors for all assets over the analyzed period.
+
+```{r}
+
+# Plot scaled Close prices and daily returns together
+options(repr.plot.width = 12, repr.plot.height = 18)
+grid.arrange(plot1, plot2, ncol = 1, heights = c(5, 3))
+
+```
+
+
+### 6. Trend Recognition
+#### Introduction to Trend Recognition Methods
+In the vast and chaotic world of financial markets, recognizing trends is akin to navigating a ship through a turbulent sea. The ability to discern the direction and momentum of market movements can be the difference between profit and loss. Various methods have been developed to identify these trends, ranging from simple moving averages to sophisticated machine learning algorithms. Among these, Gaussian Mixture Models (GMM) stand out due to their ability to capture the underlying distributions of financial data and identify distinct market regimes.
+
+#### Gaussian Mixture Model for General Trend
+
+In our pursuit of understanding market behavior and identifying potential trading opportunities, we have employed a Gaussian Mixture Model (GMM) to detect different market regimes. The GMM is particularly suitable for this task as it can model the underlying distribution of the data and classify it into distinct regimes based on the statistical properties of the time series.
+
+#### Gaussian Mixture Models
+Gaussian Mixture Models are probabilistic models that assume all data points are generated from a mixture of a finite number of Gaussian distributions with unknown parameters. This method is particularly powerful for identifying subpopulations within an overall population without requiring labeled data. By fitting a GMM to our financial data, we can identify different market regimes, such as bullish, bearish, or sideways trends, purely based on the statistical properties of the data.
+
+#### Why Use a Gaussian Mixture Model?
+A Gaussian Mixture Model is well-suited for our case of predicting four trends because it allows for the identification of multiple distinct regimes within the data. Financial markets often exhibit complex behavior that can be segmented into different states, each characterized by its own statistical proper ties. By using GMM, we can model these states and transition probabilities between them, providing a robust framework for regime detection and prediction.
+
+#### Advantages and Disadvantages
+
+##### **Advantages:**
+
+Gaussian Mixture Models are advantageous in financial time series analysis because they:
+
+-**Capture Multimodal Distributions:** Financial returns often exhibit multiple modes due to different market conditions (e.g., bull, bear, sideways). GMMs can effectively capture these modes.
+
+-**Flexibility:** GMMs can model complex, multimodal distributions.
+
+-**Unsupervised Learning:** They do not require labeled data, making them ideal for discovering hidden structures in financial data.
+
+-**Probabilistic Nature:** GMMs provide probabilistic assignments of data points to regimes, offering a measure of confidence in regime classification.
+
+##### **Disadvantages:**
+
+However, GMMs also have disadvantages:
+
+-**Assumption of Normality:** GMMs assume that data within each regime follows a Gaussian distribution, which may not always hold in financial markets.
+
+-**Computational Complexity:** Estimating the parameters of a GMM can be computationally intensive, especially for large datasets.
+
+-**Overfitting:** With too many components, GMMs can overfit the data, capturing noise rather than underlying trends.
+
+### 6.1.1 Gaussian Mixture Model for General Trend
+We chose GMM for our case of predicting four trends (regimes) due to its ability to distinguish between different market conditions based on historical price data. This method allows us to classify market states without predefined labels, providing insights into the dynamics of asset prices.
+
+First, I prepare and transform the data to ensure consistency and suitability for GMM:
+```{r}
+# Function to shift data by one day
+shift_data <- function(data) {
+  data %>%
+    mutate(Open = lag(Open),
+           High = lag(High),
+           Low = lag(Low),
+           Close = lag(Close),
+           Volume = lag(Volume)) %>%
+    drop_na()
+}
+
+# Function to ensure columns are of the same type, It handles problems when plotting 
+ensure_same_type <- function(data) {
+  data %>%
+    mutate(across(everything(), as.character)) %>%
+    mutate(across(where(is.numeric), as.numeric))
+}
+
+# Shift data by one day
+eur_usd <- shift_data(eur_usd)
+btc_usd <- shift_data(btc_usd)
+btc_eur <- shift_data(btc_eur)
+nvda <- shift_data(nvda)
+
+# Ensure columns are of the same type
+eur_usd <- ensure_same_type(eur_usd)
+btc_usd <- ensure_same_type(btc_usd)
+btc_eur <- ensure_same_type(btc_eur)
+nvda <- ensure_same_type(nvda)
+
+# Combine datasets for the general trend analysis
+combined_data <- bind_rows(
+  eur_usd %>% mutate(Symbol = "EUR_USD"),
+  btc_usd %>% mutate(Symbol = "BTC_USD"),
+  btc_eur %>% mutate(Symbol = "BTC_EUR"),
+  nvda %>% mutate(Symbol = "NVDA")
+)
+
+# Convert Date to Date class in order to plot
+combined_data$Date <- as.Date(combined_data$Date)
+```
+
+Let's fit now the first machine learning model used in this project.
+
+```{r}
+# Fit Gaussian Mixture Model for general trend
+gmm_general <- Mclust(combined_data %>% select(Open, High, Low, Close), G = 4)
+
+# Predict regimes for general trend
+combined_data$Regime <- gmm_general$classification
+
+# Calculate cumulative returns for general trend
+combined_data <- combined_data %>%
+  group_by(Symbol) %>%
+  mutate(Cumulative_Return = cumsum(Daily_Return)) %>%
+  ungroup()
+```
+
+### 6.1.2 Regime Statistics and plots
+We captured the mean and covariance statistics for each regime identified in the general trend model. These statistics provide insights into the characteristics of each detected regime:
+
+```{r}
+# Capture general regime statistics in a table
+general_stats <- data.frame(
+  Regime = 0:3,
+  Mean_Open = gmm_general$parameters$mean[1,],
+  Mean_High = gmm_general$parameters$mean[2,],
+  Mean_Low = gmm_general$parameters$mean[3,],
+  Mean_Close = gmm_general$parameters$mean[4,],
+  Covariance = sapply(1:4, function(i) mean(diag(gmm_general$parameters$variance$sigma[, , i]))) # mean of the diagonal elements (variances) of the covariance matrix for each regime
+)
+
+kable(general_stats, caption = "General Market Regime Statistics")
+```
+
+The plot below shows the cumulative returns and identified market regimes for the combined dataset, showing us the global trend depicted in each time series and how different assets perform under various market conditions.
+```{r}
+
+# Plot general trend regimes
+ggplot(combined_data, aes(x = Date, y = Cumulative_Return, color = factor(Regime), group = 1)) +
+  geom_line() +
+  facet_wrap(~ Symbol, scales = "free") +
+  scale_x_date(labels = date_format("%Y-%m-%d"), date_breaks = "1 month") +
+  labs(title = "General Market Regimes and Cumulative Returns",
+       x = "Date", y = "Cumulative Return",
+       color = "Regime") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+I propose a classification method that ensures each regime falls into a category based on a clear separation of means and covariances
+```{r }
+mean_of_means <- rowMeans(general_stats[ , c("Mean_Open", "Mean_High", "Mean_Low", "Mean_Close")])
+combined_table <- data.frame(
+  Regime = 0:3,
+  Mean_of_Means = mean_of_means,
+  Covariance = general_stats$Covariance
+)
+
+kable(combined_table, caption = "Mean of the Means for Each Regime")
+
+# Classify regimes
+classify_regimes <- function(combined_table) {
+  sorted_table <- combined_table[order(combined_table$Mean_of_Means, combined_table$Covariance),]
+  classifications <- c("Low mean and Low covariance.", "Low mean and High covariance.", "High mean and Low covariance.", "High mean and High covariance.")
+  
+  classified_table <- data.frame(
+    Regime = sorted_table$Regime,
+    Mean_of_Means = sorted_table$Mean_of_Means,
+    Covariance = sorted_table$Covariance,
+    Classification = classifications
+  )
+  
+  return(classified_table[order(classified_table$Regime),])
+}
+
+classified_table <- classify_regimes(combined_table)
+kable(classified_table, caption = "Regime Classification")
+
+
+```
+
+
+### 6.1.2 Discussion and Implications
+
+The classification of market regimes provides valuable insights into different market conditions. For instance, a regime with high mean and high covariance indicates periods of high returns but also high volatility, typical of speculative bubbles or highly bullish phases. Conversely, low mean and high covariance may indicate panic or market crashes, where returns are low but volatility is high.
+
+Understanding these regimes can help in making informed trading decisions and risk management strategies. For example, during high mean and high covariance regimes, traders might take on more aggressive strategies, while during low mean and high covariance regimes, more conservative approaches might be warranted.
+
+This approach to trend recognition and classification demonstrates the power of machine learning in financial analysis, providing a systematic method to identify and adapt to varying market conditions.
+
+By integrating these insights into a trading strategy, we can potentially improve performance and manage risks more effectively, aligning with the overarching goals of this project.
+
+### 6.2 Gaussian Mixture Model for Each Sequence Separately
+We applied a Gaussian Mixture Model (GMM) to each dataset separately to identify specific market regimes for each asset. By maintaining the consistency of identifying four regimes, we aim to ensure coherence with our previous analysis. The plots below illustrate the cumulative returns and identified regimes for each individual dataset.
+
+
+```{r}
+# Function to extract the trace of covariance matrices
+extract_covariance <- function(gmm_model) { # Extraction of covariance
+  apply(gmm_model$parameters$variance$sigma, 3, function(mat) sum(diag(mat)))
+}
+
+# Apply GMM and capture statistics for each dataset
+apply_gmm_and_capture_stats <- function(data, name) {
+  gmm <- Mclust(data %>% select(Open, High, Low, Close), G = 4)
+  data$Regime <- gmm$classification
+  data$Cumulative_Return <- cumsum(data$Daily_Return)
+  
+  stats <- data.frame(
+    Regime = 0:3,
+    Mean_Open = gmm$parameters$mean[1,],
+    Mean_High = gmm$parameters$mean[2,],
+    Mean_Low = gmm$parameters$mean[3,],
+    Mean_Close = gmm$parameters$mean[4,],
+    Covariance = extract_covariance(gmm)
+  )
+  
+  mean_of_means <- rowMeans(stats[, c("Mean_Open", "Mean_High", "Mean_Low", "Mean_Close")])
+  summary_table <- data.frame(
+    Regime = 0:3,
+    Mean_of_Means = mean_of_means,
+    Covariance = stats$Covariance
+  )
+  
+  classified_table <- classify_regimes(summary_table)
+  
+  list(plot = ggplot(data, aes(x = as.Date(Date), y = Cumulative_Return, color = factor(Regime), group = 1)) +
+         geom_line() +
+         scale_x_date(labels = date_format("%Y-%m-%d"), date_breaks = "1 month") +
+         labs(title = paste("Market Regimes and Cumulative Returns for", name),
+              x = "Date", y = "Cumulative Return",
+              color = "Regime") +
+         theme_minimal() +
+         theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+       stats_table = classified_table)
+}
+
+```
+
+### 6.2.1 Training, plotting and displaying results
+Let's calculate the trace of the covariance matrices to then apply this function within the apply_gmm_and_capture_stats function, which fits the GMM to the data, captures the regime statistics, and plots the cumulative returns for each dataset. 
+
+```{r}
+
+# Apply the function to each dataset
+eur_usd_results <- apply_gmm_and_capture_stats(eur_usd, "EUR/USD")
+btc_usd_results <- apply_gmm_and_capture_stats(btc_usd, "BTC/USD")
+btc_eur_results <- apply_gmm_and_capture_stats(btc_eur, "BTC/EUR")
+nvda_results <- apply_gmm_and_capture_stats(nvda, "NVDA")
+
+# Plot and display results for each dataset
+eur_usd_results$plot %>% print()
+kable(eur_usd_results$stats_table, caption = "EUR/USD Market Regime Statistics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+btc_usd_results$plot %>% print()
+kable(btc_usd_results$stats_table, caption = "BTC/USD Market Regime Statistics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+btc_eur_results$plot %>% print()
+kable(btc_eur_results$stats_table, caption = "BTC/EUR Market Regime Statistics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+nvda_results$plot %>% print()
+kable(nvda_results$stats_table, caption = "NVDA Market Regime Statistics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+
+```
+
+### 6.2.2 Discussion and Implications
+
+The classification of market regimes provides a robust framework to understand and anticipate different market conditions. By analyzing the results from each dataset, we can draw valuable insights into the behavior of different assets under various market conditions. Every time we run the code the results may change and thus the clasification may vary, so it is not worth to make a detailed analysis of each dataset but rather explain how the different regime may be interpreted according to the classification given and it will be uo to the executor of the code to label acording the order they had:
+
+-**Low returns and low volatility:** suggesting a stable but unprofitable market phase, indicating periods of market stagnation.
+
+-**High returns coupled with high volatility:** indicating speculative periods with high risk and reward, typical of speculative bubbles or highly bullish phases.
+
+-**High returns and low volatility:** ideal conditions for traders seeking high gains with lower risk.
+
+-**Low returns and high volatility:** typically seen during market stress, panic or downturns.
+
+Understanding these regimes and their characteristics can greatly enhance trading strategies and risk management. During high mean and high covariance regimes, traders can adopt aggressive strategies to maximize returns. Conversely, in low mean and high covariance regimes, a more conservative approach is warranted to mitigate risks.
+
+The ability to classify and anticipate market conditions using Gaussian Mixture Models provides a powerful tool for financial analysis. By integrating these insights into trading algorithms, we can potentially improve performance, manage risks more effectively, and adapt strategies to the ever-changing market dynamics.
+
+This comprehensive approach to trend recognition and classification underscores the potential of machine learning in financial markets, offering a systematic method to navigate the complexities of market behaviors and make informed trading decisions.
+
+By employing GMM for trend recognition, we leverage its ability to model complex market behaviors, providing a nuanced understanding of market regimes and aiding in the development of robust trading strategies.
+
+## 7 Model Architecture
+
+### 7.1 Some explanations to better undestand the "why" of the results we will see.
+
+In this section, we delve into the various components of the model architecture used in the project. This includes explanations of LSTM and CNN layers, their advantages and disadvantages, and a detailed description of the CNN-LSTM model used in the study.
+
+#### What is an LSTM?
+
+Long Short-Term Memory (LSTM) is a type of recurrent neural network (RNN) capable of learning and remembering over long sequences of data. Unlike traditional RNNs, LSTMs can retain information over extended periods, making them particularly suitable for time series data and sequential tasks like financial market predictions.
+
+##### Advantages of LSTM:
+- **Long-Term Dependencies**: LSTMs can capture long-term dependencies in the data, which is crucial for understanding market trends that develop over time.
+- **Flexibility**: They can handle sequences of varying lengths, making them versatile for different types of financial data.
+- **Robustness**: LSTMs are less prone to the vanishing gradient problem, which can affect the performance of traditional RNNs.
+
+##### Disadvantages of LSTM:
+- **Complexity**: They are computationally intensive and require significant resources to train.
+- **Overfitting**: Without proper regularization, LSTMs can overfit to the training data, reducing their effectiveness on unseen data.
+- **Training Time**: LSTMs generally take longer to train compared to simpler models.
+
+#### What is a CNN?
+
+Convolutional Neural Networks (CNNs) are designed to process data with a grid-like topology, such as images. They apply convolutional layers to capture spatial hierarchies in the data, making them effective for feature extraction. In financial applications, CNNs can be used to identify patterns and trends in time series data.
+
+##### Advantages of CNN:
+- **Feature Extraction**: CNNs can automatically learn relevant features from the data, reducing the need for manual feature engineering.
+- **Efficiency**: They are efficient in processing large amounts of data, making them suitable for high-frequency trading.
+- **Scalability**: CNNs can be scaled to handle large datasets and complex models.
+
+##### Disadvantages of CNN:
+- **Data Requirements**: CNNs require a large amount of data to train effectively.
+- **Computational Cost**: They are resource-intensive, requiring powerful hardware for training and inference.
+- **Black Box Nature**: The decision-making process of CNNs can be difficult to interpret, posing challenges for transparency and explainability.
+
+#### What is a Max-Pooling Layer?
+
+A max-pooling layer is a down-sampling operation commonly used in CNNs to reduce the spatial dimensions of the input. It selects the maximum value from a defined window, helping to retain the most important features while reducing the size of the data.
+
+##### Advantages of Max-Pooling Layers:
+- **Dimensionality Reduction**: They help reduce the computational load by decreasing the size of the data.
+- **Translation Invariance**: Max-pooling provides a degree of translation invariance, making the model more robust to shifts in the data.
+- **Overfitting Reduction**: By reducing the number of parameters, max-pooling can help mitigate overfitting.
+
+##### Disadvantages of Max-Pooling Layers:
+- **Information Loss**: Some information may be lost during the pooling process, potentially affecting model performance.
+- **Static Pooling Size**: The fixed size of the pooling window may not capture all relevant features in the data.
+
+#### What is a Flattening Layer?
+
+A flattening layer converts the multi-dimensional output of the convolutional layers into a one-dimensional vector. This step is essential for connecting the convolutional layers to the fully connected (dense) layers in a neural network.
+
+##### Advantages of Flattening Layers:
+- **Simplification**: They simplify the complex structure of the data, making it suitable for the dense layers.
+- **Connectivity**: Flattening allows for the integration of features extracted by convolutional layers into a traditional neural network.
+
+##### Disadvantages of Flattening Layers:
+- **Loss of Spatial Structure**: The spatial relationships between features can be lost during the flattening process.
+
+#### What is a Dense Layer?
+
+A dense layer, also known as a fully connected layer, is a neural network layer where each neuron is connected to every neuron in the previous layer. This layer is typically used for final decision-making or regression tasks.
+
+#### Advantages of Dense Layers:
+- **Flexibility**: Dense layers can model complex relationships between inputs and outputs.
+- **Integration**: They combine features extracted by previous layers to make predictions.
+
+#### Disadvantages of Dense Layers:
+- **Overfitting**: Dense layers are prone to overfitting, especially with small datasets.
+- **Computational Load**: They can be computationally expensive, particularly in large networks.
+
+#### The CNN-LSTM Model Proposed
+
+The CNN-LSTM model combines the strengths of CNNs and LSTMs to capture both spatial and temporal dependencies in the data. The architecture consists of:
+
+- **CNN Component**: Three convolutional layers with neuron sizes 64, 128, and 64, followed by max-pooling layers and a flattening layer to prepare the data for the LSTM component.
+- **LSTM Component**: Two bidirectional LSTM layers with 100 units each, interspersed with dropout layers to prevent overfitting.
+- **Dense Layer**: A final dense layer with a linear activation function for regression.
+
+![CNN-LSTM Model Architecture](model_architecture.png)
+
+![CNN-LSTM Model Summary](model_summary.png)
+
+
+We will replicate this model summary in our code at the end to verify we train the actual model. Both images were taken from the actual paper. 
+
+##### Advantages of Combining CNN and LSTM:
+- **Comprehensive Feature Extraction**: CNNs extract spatial features, while LSTMs capture temporal dependencies, providing a holistic understanding of the data.
+- **Improved Performance**: This combination can lead to better performance in predicting complex time series patterns.
+- **Versatility**: The model can be applied to various types of financial data, making it highly versatile.
+
+##### Disadvantages of Combining CNN and LSTM:
+- **Complexity**: The combined model is more complex and computationally intensive than using either CNN or LSTM alone.
+- **Training Time**: Training such a model requires significant time and resources.
+- **Hyperparameter Tuning**: Finding the optimal hyperparameters for both CNN and LSTM components can be challenging and time-consuming.
+
+### Backtesting System
+
+Our system conducts weekly backtests to assess the model's efficacy in real-world scenarios.
+
+#### Parameters for Backtesting:
+1. **quant_training_points**: This parameter defines the number of data points used for training the model before each backtest. It ensures that the model has enough historical data to learn from, thereby improving its predictive capabilities.
+
+2. **time_window_deploy**: This parameter specifies the duration (set in munites but think of it in hours) for which the model will be deployed to make predictions. It defines the window over which the model's performance is evaluated in each backtest iteration.
+
+3. **time_window_hyperparam**: This parameter indicates the time window used for hyperparameter tuning. It allows the model to find the optimal settings for its architecture and training process over a specified period (set in munites but think of it in days).
+
+4. **initial_allocation**: This parameter sets the initial allocation of the portfolio for trading, set always to 0.001. It represents the proportion of the portfolio value that is invested based on the model's predictions.
+
+5. **initial_portfolio_value**: This parameter defines the starting value of the portfolio. It provides a baseline for evaluating the performance of the trading strategy over time. Set to 100 always
+
+6. **window_size**: This parameter determines the size of the window used for creating sequences of data points. It influences the temporal context that the model considers when making predictions. Set to 100 always (while personally playing with the model, shorter sequences tend to give better results as long as the size of the training points do not overly excess this parameter in several orders of magnitude)
+
+Various backtests were conducted with different parameters to evaluate the robustness of the backtesting strategy. The configurations tested:
+
+- (quant_training_points, time_window_deploy (hours), time_window_hyperparam (days), window_size (minutes))
+- (1200, 5, 7, 100)
+- (1200, 3, 7, 100)
+- (10200, 3, 7, 100)
+- (1200, 3, 7, 100)
+- (12200, 3, 7, 100)
+- (1200, 9, 7, 100)
+- (1200, 8, 7, 100)
+- (1200, 2, 7, 100)
+- (4200, 3, 7, 100)
+- (4200, 4, 7, 100)
+
+This was enough to make the project folder almost 7Gb, so we stopped there.
+
+#### Rolling Window Backtest
+
+To ensure robust model evaluation, a rolling window approach was used:
+
+- **Initial Hyperparameter Search**: Hyperparameters were first optimized to initialize the model for the first week.
+
+- **Weekly Training**: The model was trained on EUR/USD data for the preceding `quant_training_points` and deployed for predictions on EUR/USD, BTC/USD, and BTC/EUR for the upcomming week. This strategy tests the model's ability to generalize across different assets without direct training on them.
+
+#### Allocation Strategy
+
+Allocation was based on volatility rather than returns due to the model's accuracy, adding an element of fun and unpredictability (once the reader has seen the results I hope he will understand why is more fun to do it with volatility rather than with the actual return of the strategy). This approach was chosen too to align with the observed market conditions and the model's performance.
+
+#### Weekly Training and Deployment
+
+Each week, the model was retrained and deployed on the next week's data, trading only from Monday to Friday, 9 AM to 5 PM. This schedule ensures that the model operates within the most active trading hours, enhancing the accuracy and relevance of the predictions.
+
+By conducting multiple backtests with varying parameters, we aimed to evaluate the robustness and adaptability of the backtesting strategy. The results from these tests provide insights into the model's performance under different market conditions and parameter configurations.
+
+let's re-prepare the data to ensure we train our model properly as we want. 
+
+```{r}
+# Load and prepare the datasets
+eur_usd <- read.csv("data/EURUSD_Candlestick_1_M_BID_21.12.2023-01.03.2024.csv")
+btc_usd <- read.csv("data/BTCUSD_Candlestick_1_M_BID_21.12.2023-01.03.2024.csv")
+btc_eur <- read.csv("data/BTCEUR_Candlestick_1_M_BID_21.12.2023-01.03.2024.csv")
+
+eur_usd$Date <- as.POSIXct(eur_usd$Date, format="%d.%m.%Y %H:%M:%S.%OS", tz="UTC")
+btc_usd$Date <- as.POSIXct(btc_usd$Date, format="%d.%m.%Y %H:%M:%S.%OS", tz="UTC")
+btc_eur$Date <- as.POSIXct(btc_eur$Date, format="%d.%m.%Y %H:%M:%S.%OS", tz="UTC")
+
+
+# Function to scale using max-min
+scaler <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+# Scaling back the data
+scale_back <- function(x, original_data) {
+  min_val <- min(original_data)
+  max_val <- max(original_data)
+  return(x * (max_val - min_val) + min_val)
+}
+
+prepare_data <- function(data) {
+  data <- data %>%
+    mutate(Daily_Return = (Close - lag(Close)) / lag(Close)) %>%
+    mutate(across(everything(), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .))) %>%
+    mutate(Direction = ifelse(Daily_Return > 0, 1, -1)) %>%
+    mutate(across(c(Open, High, Low, Close, Daily_Return), scaler))
+  return(data)
+}
+
+eur_usd <- prepare_data(eur_usd)
+btc_usd <- prepare_data(btc_usd)
+btc_eur <- prepare_data(btc_eur)
+
+
+```
+
+
+
+
+
+### 7.2 Model costruction:
+
+#### Justification for Keras:
+
+We chose Keras as the framework for our machine learning model due to several reasons:
+
+1. **Ease of Use**: Keras provides a high-level API that simplifies the process of building and training neural networks. Its user-friendly interface allows for rapid prototyping and experimentation.
+
+2. **Integration with TensorFlow**: Keras is a wrapper for TensorFlow, one of the most powerful and widely-used deep learning frameworks. This integration provides access to advanced functionalities and optimizations offered by TensorFlow.
+
+3. **Flexibility and Scalability**: Keras can run seamlessly on both CPUs and GPUs, making it suitable for large-scale computations and training. It also supports distributed training, which is essential for handling large datasets and complex models.
+
+4. **Community Support**: Keras has a large and active community, providing extensive documentation, tutorials, and forums for troubleshooting and learning. This support network accelerates the development process and helps resolve issues quickly.
+
+5. **Model Reproducibility**: Keras allows for saving and loading models, ensuring that experiments are reproducible and results can be shared or revisited in the future.
+
+### Grid Search for Hyperparameter Tuning:
+
+The grid search function `perform_grid_search` is designed to find the optimal hyperparameters for our CNN-LSTM model. It iteratively tests different combinations of hyperparameters and selects the configuration that minimizes the mean squared error.
+
+#### Key Components of the Grid Search:
+
+1. **Model Building**: The `build_model` function constructs the CNN-LSTM model with varying hyperparameters such as dropout rates and optimizers. After some experimentation with GridSearch I found the ranges proposed in the function to work best, without touching the kernels nor filters nor the activation. These parameter should vary if you change the amount of data to train with or the size of the sequences to much bigger numbers, but for the sacle we are interested in (window_size = 100)  
+
+2. **Random Search**: The `kt$RandomSearch` function performs the hyperparameter search by testing multiple configurations. It selects the best model based on the specified objective (minimizing mean squared error).
+
+3. **Training and Evaluation**: The search process involves training the model on the training data and evaluating its performance on the validation data. This ensures that the model generalizes well to unseen data.
+
+4. **Optimization**: The hyperparameters that result in the lowest mean squared error are selected for the final model. This optimized model is then used for backtesting and deployment.
+
+
+```{r}
+
+# Define hyperparameter search function
+perform_grid_search <- function(train_X, train_Y, model_date) {
+  build_model <- function(hp) {
+    model <- keras_model_sequential() %>%
+      time_distributed(layer_conv_1d(filters = 64, kernel_size = 3, activation = 'relu'), input_shape = list(NULL, window_size, 1)) %>%
+      time_distributed(layer_max_pooling_1d(pool_size = 2)) %>%
+      time_distributed(layer_conv_1d(filters = 128, kernel_size = 3, activation = 'relu')) %>%
+      time_distributed(layer_max_pooling_1d(pool_size = 2)) %>%
+      time_distributed(layer_conv_1d(filters = 64, kernel_size = 3, activation = 'relu')) %>%
+      time_distributed(layer_max_pooling_1d(pool_size = 2)) %>%
+      time_distributed(layer_flatten()) %>%
+      bidirectional(layer_lstm(units = 100, return_sequences = TRUE)) %>%
+      layer_dropout(rate = hp$Float('dropout1', 0.4, 0.6, step = 0.01)) %>%
+      bidirectional(layer_lstm(units = 100, return_sequences = FALSE)) %>%
+      layer_dropout(rate = hp$Float('dropout2', 0.4, 0.6, step = 0.01)) %>%
+      layer_dense(units = 1, activation = 'linear')
+
+    optimizer <- hp$Choice('optimizer', c('rmsprop', 'adam', 'sgd'))
+    loss <- 'mean_squared_error'
+    metrics <- c('mean_squared_error', 'mean_absolute_error')
+
+    model %>% compile(
+      optimizer = optimizer,
+      loss = loss,
+      metrics = metrics
+    )
+    return(model)
+  }
+
+  initial_date <- as.POSIXct(data_filtered$Date[1])
+  project_name <- paste0("cnn_lstm_tuning_", 
+                         format(model_date, "%Y_%m_%d_%H"), 
+                         "_N_", quant_training_points, 
+                         "_D_", time_window_deploy, 
+                         "_Win_", window_size)
+  dir_name <- paste0("my_dir/", "N_", quant_training_points, 
+                         "_D_", time_window_deploy, 
+                         "_Win_", window_size)
+  tuner <- kt$RandomSearch(
+    build_model,
+    objective = list(kt$Objective('mean_squared_error', direction = 'min')),
+    max_trials = 2L,
+    executions_per_trial = 1L,
+    directory = dir_name,
+    project_name = project_name,
+    seed = 42
+  )
+
+  tuner$search(
+    x = train_X, 
+    y = train_Y,
+    validation_split = 0.2,
+    epochs = 2L,
+    batch_size = 40L
+  )
+  
+  return(tuner$get_best_models(num_models = 1L)[[1]])
+}
+
+```
+
+
+
+
+### 7.3 Metrics and Sequence Creation:
+
+The functions `explained_variance`, `r2_score`, and `max_error` are used to evaluate the model's performance. These metrics provide insights into how well the model predicts the target variable.
+
+The `create_sequences` function prepares the data for training by creating sequences of a specified window size. Each sequence consists of `window_size` data points, and the corresponding target value is the price at the end of the sequence.
+
+
+```{r}
+
+# Define metric functions
+explained_variance <- function(true_values, predicted_values) {
+  residuals <- true_values - predicted_values
+  explained_variance <- 1 - var(residuals) / var(true_values)
+  return(explained_variance)
+}
+
+r2_score <- function(y_true, y_pred) {
+  1 - sum((y_true - y_pred)^2) / sum((y_true - mean(y_true))^2)
+}
+
+max_error <- function(y_true, y_pred) {
+  max(abs(y_true - y_pred))
+}
+
+# Function to create sequences
+create_sequences <- function(data, column_name, window_size) {
+  X <- list()
+  Y <- list()
+  for (i in seq(1, nrow(data) - window_size - 1)) {
+    first <- data[[column_name]][i]
+    if (!is.na(first) && first != 0) {
+      temp <- sapply(0:(window_size - 1), function(j) (data[[column_name]][i + j] - first) / first) # From the actual paper.
+      temp2 <- (data[[column_name]][i + window_size] - first) / first
+      X[[i]] <- array(temp, dim = c(window_size, 1))
+      Y[[i]] <- array(temp2, dim = c(1, 1))
+    } else {
+      X[[i]] <- array(rep(0, window_size), dim = c(window_size, 1))
+      Y[[i]] <- array(0, dim = c(1, 1))
+    }
+  }
+  return(list(X = X, Y = Y))
+}
+
+# Function to split data into training and test sets
+split_train_test <- function(X, Y, window_size, test_ratio = 0.2) {
+  set.seed(123)
+  indices <- sample(1:length(X), length(X) * (1 - test_ratio))
+  train_indices <- indices
+  test_indices <- setdiff(1:length(X), train_indices)
+  
+  train_X <- array_reshape(do.call(rbind, X[train_indices]), c(length(train_indices), 1, window_size, 1))
+  train_Y <- array_reshape(do.call(rbind, Y[train_indices]), c(length(train_indices), 1))
+  test_X <- array_reshape(do.call(rbind, X[test_indices]), c(length(test_indices), 1, window_size, 1))
+  test_Y <- array_reshape(do.call(rbind, Y[test_indices]), c(length(test_indices), 1))
+  
+  return(list(train_X = train_X, train_Y = train_Y, test_X = test_X, test_Y = test_Y))
+}
+```
+
+
+Here are some more function to calculate results and metrics. Maybe the most important one here is the `deploy_model` function, which is responsible for deploying the trained model to make predictions on the test data. It evaluates the model's performance and calculates the trading results, including payoffs, cumulative payoffs, accuracy, and drawdown.
+
+```{r}
+
+# Function to calculate results and evaluation metrics
+calculate_results <- function(data_deploy, deploy_Y, predicted, time_window_deploy, portfolio_value, current_allocation) {
+  signal <- ifelse(predicted > lag(deploy_Y), 1, -1)
+  signal <- c(signal[-1], 0)  # Shift signal to align with the next prediction
+  
+  results <- data.frame(
+    Date = data_deploy$Date[1:(time_window_deploy-1)],
+    True_Return = deploy_Y,
+    Predicted_Return = predicted,
+    Signal = signal
+  )
+  results <- results %>%
+    mutate(
+      Direction = data_deploy$Direction[1:time_window_deploy-1],
+      Payoff = ifelse(Signal == Direction, 0.85 * current_allocation * portfolio_value, -current_allocation * portfolio_value),
+      Cumulative_Payoff = portfolio_value + cumsum(Payoff),
+      Accuracy = cummean(Signal == Direction),
+      Max_Cumulative_Payoff = cummax(Cumulative_Payoff),
+      Drawdown = Max_Cumulative_Payoff - Cumulative_Payoff
+    )
+  return(results)
+}
+
+# Define function to perform deployment on all datasets
+deploy_model <- function(model, data_list, current_time, time_window_deploy, window_size, portfolio_value, current_allocation) {
+  results_list <- list()
+  
+  for (dataset in names(data_list)) {
+    data <- data_list[[dataset]]
+    data_deploy <- data %>% filter(Date >= current_time & Date < current_time + minutes(time_window_deploy + window_size)) #cambiar a Date >= current_time - minutes(window_size) para capturar secuencias anteriores?
+    
+    if (nrow(data_deploy) < (time_window_deploy + window_size)) {
+      next
+    }
+    
+    # Ensure there are no NA values
+    data_deploy <- data_deploy %>%
+      mutate(Daily_Return = ifelse(is.na(Daily_Return), 0, Daily_Return))
+    
+    # Prepare deployment data
+    sequences <- create_sequences(data_deploy, "Daily_Return", window_size)
+    X_deploy <- sequences$X
+    Y_deploy <- sequences$Y
+    
+    deploy_X <- array_reshape(do.call(rbind, X_deploy), c(length(X_deploy), 1, window_size, 1))
+    deploy_Y <- array_reshape(do.call(rbind, Y_deploy), c(length(Y_deploy), 1))
+    predicted <- model %>% predict(deploy_X)
+    
+    # Scale back the predicted values
+    deploy_Y <- scale_back(deploy_Y, data_deploy$Daily_Return)
+    predicted <- scale_back(predicted, data_deploy$Daily_Return)
+    
+    # Calculate results and evaluation metrics
+    results <- calculate_results(data_deploy, deploy_Y, predicted, time_window_deploy, portfolio_value, current_allocation)
+    
+    results_list[[dataset]] <- results
+  }
+  
+  return(results_list)
+}
+```
+
+### 7.4 Initial Hyperparameter Search:
+
+We start the backtesting process with an initial hyperparameter search to optimize the model's settings. This is the model we will deploy during the whole fisrt week.
+
+```{r}
+# Define parameters
+quant_training_points <- 1200
+time_window_deploy <- 8 * 60 # 3 hours in minutes
+time_window_hyperparam <- 7 * 24 * 60 # One week in minutes
+initial_allocation <- 0.001 # 0.1% of the portfolio
+initial_portfolio_value <- 100
+window_size <- 100
+
+# Initialize variables
+current_time <- as.POSIXct(min(eur_usd$Date))
+end_time <- as.POSIXct(max(eur_usd$Date))
+current_allocation <- initial_allocation
+portfolio_value <- initial_portfolio_value
+
+# Perform initial hyperparameter search
+data_filtered <- head(eur_usd, quant_training_points)
+sequences <- create_sequences(data_filtered, "Daily_Return", window_size)
+X <- sequences$X
+Y <- sequences$Y
+
+split_data <- split_train_test(X, Y, window_size)
+train_X <- split_data$train_X
+train_Y <- split_data$train_Y
+eval_X <- split_data$test_X
+eval_Y <- split_data$test_Y
+
+best_model <- perform_grid_search(train_X, train_Y, current_time)
+print(summary(best_model))
+```
+
+We have effeively replicated the model from the paper!
+
+### 7.5 Rolling Window Backtest Implementation:
+
+The rolling window backtest approach involves the following steps:
+
+1. **Initial Hyperparameter Search**: Before starting the weekly backtests, we have already performed an initial hyperparameter search to optimize the model's settings.
+
+2. **Volatility-Based Allocation:** Adjust the allocation based on the weekly volatility and each week thereafter. if weekly_volatility < 0.01 the allocation gets multiply by 1.5, if weekly_volatility > 0.02 then initial_allocation * 0.5 and initial_allocation else
+2. **Weekly Training**: At the beginning of each week, the model is trained on the most recent `quant_training_points` from the EUR/USD dataset. This ensures that the model learns from the latest market trends and patterns.
+
+3. **Deployment**: After training, the model is deployed to make predictions for the upcoming week. Predictions are made for EUR/USD, BTC/USD, and BTC/EUR to test the model's generalizability across different assets (NVIDIA gave some errors given the lack of data, so i took it out from here).
+
+4. **Evaluation and Adjustment**: At the end of each week, the model's performance is evaluated based on metrics such as MSE, MAE, and explained variance. The portfolio allocation is adjusted based on the observed weekly volatility, and the model is retrained for the next week.
+
+5. **Restricted Trading Hours**: The model trades only from Monday to Friday, 9 AM to 5 PM. This restriction ensures that the model operates within the most active and liquid trading hours, reducing the impact of low-volume trading periods.
+
+```{r}
+
+
+# Rolling window loop
+results_storage <- list()
+while (current_time <= end_time) {
+  print(current_time)
+  print(weekdays(current_time))
+  if (!((wday(current_time) %in% c(2, 3, 4, 5, 6)) &&
+        format(current_time, "%H:%M:%S") >= "09:00:00" &&
+        format(current_time, "%H:%M:%S") <= "17:00:00")) {
+    current_time <- current_time + minutes(time_window_deploy)
+    next
+  }
+  
+  # Filter data for the current training window
+  data_filtered <- eur_usd %>% filter(Date < current_time)
+  
+  # Filter data for the deployment window
+  data_deploy <- eur_usd %>% filter(Date >= current_time & Date < current_time + minutes(time_window_deploy + window_size))
+  
+  # Check if there are enough data points to train
+  if (nrow(data_filtered) < quant_training_points || nrow(data_deploy) < (time_window_deploy + window_size)) {
+    current_time <- current_time + minutes(time_window_deploy)
+    next
+  }
+  
+  # Check if it's time for Grid Search and volatility calculation
+  if (wday(current_time) == 2) {
+    # Prepare training data
+    data_training <- tail(data_filtered, quant_training_points)
+    sequences <- create_sequences(data_training, "Daily_Return", window_size)
+    X <- sequences$X
+    Y <- sequences$Y
+    
+    split_data <- split_train_test(X, Y, window_size)
+    train_X <- split_data$train_X
+    train_Y <- split_data$train_Y
+    eval_X <- split_data$test_X
+    eval_Y <- split_data$test_Y
+    
+    # Perform Grid Search
+    best_model <- perform_grid_search(train_X, train_Y, current_time)
+    
+    # Calculate volatility
+    weekly_volatility <- sd(data_training$Daily_Return, na.rm = TRUE)
+    print(sprintf("Weekly volatility: %f", weekly_volatility))
+    
+    # Adjust allocation based on volatility
+    current_allocation <- if (weekly_volatility < 0.01) {
+      initial_allocation * 1.5
+    } else if (weekly_volatility > 0.02) {
+      initial_allocation * 0.5
+    } else {
+      initial_allocation
+    }
+    print(sprintf("Adjusted allocation: %f", current_allocation))
+  }
+  
+  # Train the best model with current data
+  if (exists("best_model")) {
+    best_model %>% fit(
+      x = train_X, 
+      y = train_Y,
+      validation_data = list(eval_X, eval_Y),
+      epochs = 1L,
+      batch_size = 40L,
+      verbose = 0,
+      shuffle = TRUE
+    )
+  }
+  # Ensure there are no NA values
+  data_deploy <- data_deploy %>%
+    mutate(Daily_Return = ifelse(is.na(Daily_Return), 0, Daily_Return))
+  
+  # Prepare deployment data for EUR/USD
+  sequences <- create_sequences(data_deploy, "Daily_Return", window_size)
+  X_deploy <- sequences$X
+  Y_deploy <- sequences$Y
+  
+  deploy_X <- array_reshape(do.call(rbind, X_deploy), c(length(X_deploy), 1, window_size, 1))
+  deploy_Y <- array_reshape(do.call(rbind, Y_deploy), c(length(Y_deploy), 1))
+  predicted <- best_model %>% predict(deploy_X)
+  
+  # Scale back the predicted values
+  deploy_Y <- scale_back(deploy_Y, data_deploy$Daily_Return)
+  predicted <- scale_back(predicted, data_deploy$Daily_Return)
+  
+  # Calculate results and evaluation metrics for EUR/USD
+  eur_usd_results <- calculate_results(data_deploy, deploy_Y, predicted, time_window_deploy, portfolio_value, current_allocation)
+  
+  # Update portfolio value
+  portfolio_value <- tail(eur_usd_results$Cumulative_Payoff, 1)
+  
+  # Save EUR/USD results
+  results_storage[[paste("EUR_USD", as.character(current_time), sep = "_")]] <- eur_usd_results
+  
+  file_name <- paste0("files/all/", "N_", quant_training_points, 
+                   "_D_", time_window_deploy, 
+                   "_Win_", window_size, ".RData")
+  
+  # Perform deployment on other datasets
+  data_list <- list("BTC_USD" = btc_usd, "BTC_EUR" = btc_eur)
+  other_results <- deploy_model(best_model, data_list, current_time, time_window_deploy, window_size, portfolio_value, current_allocation)
+  
+  # Save results for other datasets
+  for (dataset in names(other_results)) {
+    results_storage[[paste(dataset, as.character(current_time), sep = "_")]] <- other_results[[dataset]]
+  }
+  
+  save(results_storage, file = file_name) # I realized once i had done may backtests this was after the precedent for loop, it dit not capture BTC_USD nor BTC_EUR, but for the next week in the loop
+  
+  # Print evaluation metrics for EUR/USD
+  var <- explained_variance(deploy_Y, predicted)
+  r2 <- r2_score(deploy_Y, predicted)
+  var2 <- max_error(deploy_Y, predicted)
+  print(sprintf("Variance: %f", var))
+  print(sprintf("R2 Score: %f", r2))
+  print(sprintf("Max Error: %f", var2))
+  
+  # Move to the next deployment window
+  current_time <- current_time + minutes(time_window_deploy)
+}
+
+# Combine all results into a single data frame
+combined_data <- do.call(rbind, lapply(results_storage, function(x) {
+  cbind(Date = x$Date, True_Return = x$True_Return, Predicted_Return = x$Predicted_Return, Signal = x$Signal, 
+        Direction = x$Direction, Payoff = x$Payoff, Cumulative_Payoff = x$Cumulative_Payoff, 
+        Accuracy = x$Accuracy, Max_Cumulative_Payoff = x$Max_Cumulative_Payoff, Drawdown = x$Drawdown)
+}))
+
+
+```
+
+```{r}
+# Plot cumulative payoff over time
+ggplot(combined_data, aes(x = Date, y = Cumulative_Payoff, color = as.factor(dataset))) +
+  geom_line() +
+  labs(title = "Cumulative Payoff Over Time", x = "Date", y = "Cumulative Payoff")
+
+eur_usd_results$Cumulative_Accuracy <- cummean(eur_usd_results$Signal == eur_usd_results$Direction)
+
+# Plot cumulative accuracy over time
+ggplot(combined_data, aes(x = Date, y = Accuracy, color = as.factor(dataset))) +
+  geom_line() +
+  labs(title = "Cumulative Accuracy Over Time", x = "Date", y = "Cumulative Accuracy")
+
+# Plot drawdown over time
+ggplot(combined_data, aes(x = Date, y = Drawdown, color = as.factor(dataset))) +
+  geom_line() +
+  labs(title = "Drawdown Over Time", x = "Date", y = "Drawdown")
+
+```
+
+```{r results = 'asis'}
+configs <- list(
+  c(1200, 5, 7, 100),
+  c(1200, 3, 7, 100),
+  c(10200, 3, 7, 100),
+  c(1200, 3, 7, 100),
+  c(12200, 3, 7, 100),
+  c(1200, 9, 7, 100),
+  c(1200, 8, 7, 100),
+  c(1200, 2, 7, 100),
+  c(4200, 3, 7, 100),
+  c(4200, 4, 7, 100)
+)
+
+process_configuration <- function(config) {
+  quant_training_points <- config[1]
+  time_window_deploy <- config[2] * 60
+  time_window_hyperparam <- config[3] * 24 * 60
+  window_size <- config[4]
+  
+  file_name <- paste0("files/all/", "N_", quant_training_points, 
+                      "_D_", time_window_deploy, 
+                      "_Win_", window_size, ".RData")
+  
+  results_storage <- load_rdata_file(file_name)
+  dataframes_by_asset <- extract_dataframes_by_asset(results_storage)
+  combined_dataframes <- create_combined_dataframes(dataframes_by_asset)
+  all_plots <- plot_all_metrics(combined_dataframes)
+  additional_metrics <- calculate_additional_metrics_all(combined_dataframes)
+  
+  return(list(plots = all_plots, metrics = additional_metrics, config = config))
+}
+
+# Load the .RData file
+load_rdata_file <- function(file_path) {
+  load(file_path)
+  return(results_storage)
+}
+
+extract_dataframes_by_asset <- function(results_storage) {
+  eur_usd_list <- list()
+  btc_usd_list <- list()
+  btc_eur_list <- list()
+  
+  for (name in names(results_storage)) {
+    if (grepl("EUR_USD", name)) {
+      eur_usd_list[[name]] <- results_storage[[name]]
+    } else if (grepl("BTC_USD", name)) {
+      btc_usd_list[[name]] <- results_storage[[name]]
+    } else if (grepl("BTC_EUR", name)) {
+      btc_eur_list[[name]] <- results_storage[[name]]
+    }
+  }
+  
+  return(list(EUR_USD = eur_usd_list, BTC_USD = btc_usd_list, BTC_EUR = btc_eur_list))
+}
+
+combine_dataframes <- function(data_list) {
+  combined_data <- do.call(rbind, data_list)
+  combined_data$Date <- as.POSIXct(combined_data$Date, origin = "1970-01-01")
+  combined_data <- combined_data[order(combined_data$Date), ]
+  return(combined_data)
+}
+
+create_combined_dataframes <- function(dataframes_by_asset) {
+  eur_usd_combined <- combine_dataframes(dataframes_by_asset$EUR_USD)
+  btc_usd_combined <- combine_dataframes(dataframes_by_asset$BTC_USD)
+  btc_eur_combined <- combine_dataframes(dataframes_by_asset$BTC_EUR)
+  
+  return(list(EUR_USD = eur_usd_combined, BTC_USD = btc_usd_combined, BTC_EUR = btc_eur_combined))
+}
+
+# Additional metrics: Precision, Recall, and F1-Score
+calculate_additional_metrics <- function(true_direction, predicted_signal) {
+  tp <- sum((true_direction == 1) & (predicted_signal == 1))
+  tn <- sum((true_direction == -1) & (predicted_signal == -1))
+  fp <- sum((true_direction == -1) & (predicted_signal == 1))
+  fn <- sum((true_direction == 1) & (predicted_signal == -1))
+  
+  precision <- tp / (tp + fp)
+  recall <- tp / (tp + fn)
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+  
+  return(data.frame(Precision = precision, Recall = recall, F1_Score = f1_score))
+}
+
+calculate_additional_metrics_all <- function(combined_dataframes) {
+  eur_usd_metrics <- calculate_additional_metrics(combined_dataframes$EUR_USD$Direction, combined_dataframes$EUR_USD$Signal)
+  btc_usd_metrics <- calculate_additional_metrics(combined_dataframes$BTC_USD$Direction, combined_dataframes$BTC_USD$Signal)
+  btc_eur_metrics <- calculate_additional_metrics(combined_dataframes$BTC_EUR$Direction, combined_dataframes$BTC_EUR$Signal)
+  
+  return(list(EUR_USD = eur_usd_metrics, BTC_USD = btc_usd_metrics, BTC_EUR = btc_eur_metrics))
+}
+
+plot_metrics <- function(combined_data, asset_name) {
+  # Continuous Accuracy Calculation
+  combined_data <- combined_data %>%
+    mutate(Continuous_Accuracy = cummean(Direction == Signal))
+  
+  p1 <- ggplot(combined_data, aes(x = Date, y = Cumulative_Payoff)) +
+    geom_line(color = "blue") +
+    labs(title = paste("Cumulative Payoff for", asset_name), x = "Date", y = "Cumulative Payoff") +
+    theme_minimal()
+  
+  p2 <- ggplot(combined_data, aes(x = Date, y = Accuracy)) +
+    geom_line(color = "green") +
+    labs(title = paste("Accuracy for", asset_name), x = "Date", y = "Accuracy") +
+    theme_minimal()
+  
+  p3 <- ggplot(combined_data, aes(x = Date, y = Drawdown)) +
+    geom_line(color = "red") +
+    labs(title = paste("Drawdown for", asset_name), x = "Date", y = "Drawdown") +
+    theme_minimal()
+  
+  # Plot True_Return vs Predicted_Return
+  p4 <- ggplot(combined_data, aes(x = Date)) +
+    geom_line(aes(y = True_Return, color = "True Return")) +
+    geom_line(aes(y = Predicted_Return, color = "Predicted Return")) +
+    labs(title = paste("True Return vs Predicted Return for", asset_name), x = "Date", y = "Return") +
+    theme_minimal() +
+    scale_color_manual(values = c("True Return" = "blue", "Predicted Return" = "red"))
+  
+  # Continuous Accuracy Plot
+  p5 <- ggplot(combined_data, aes(x = Date, y = Continuous_Accuracy)) +
+    geom_line(color = "purple") +
+    labs(title = paste("Continuous Accuracy for", asset_name), x = "Date", y = "Continuous Accuracy") +
+    theme_minimal()
+  
+  return(list(Cumulative_Payoff = p1, Accuracy = p2, Drawdown = p3, True_vs_Predicted = p4, Continuous_Accuracy = p5))
+}
+
+plot_all_metrics <- function(combined_dataframes) {
+  eur_usd_plots <- plot_metrics(combined_dataframes$EUR_USD, "EUR/USD")
+  btc_usd_plots <- plot_metrics(combined_dataframes$BTC_USD, "BTC/USD")
+  btc_eur_plots <- plot_metrics(combined_dataframes$BTC_EUR, "BTC/EUR")
+  
+  return(list(EUR_USD = eur_usd_plots, BTC_USD = btc_usd_plots, BTC_EUR = btc_eur_plots))
+}
+
+# Process each configuration and store the results
+results <- lapply(configs, process_configuration)
+
+# Print the plots for each configuration and asset
+for (result in results) {
+  config <- result$config
+  plots <- result$plots
+  metrics <- result$metrics
+  cat(paste("Configuration: N =", config[1], "D =", config[2], "hours, Win =", config[4], "minutes\n"))
+  
+  grid.arrange(plots$EUR_USD$Continuous_Accuracy, plots$EUR_USD$Accuracy, plots$EUR_USD$Cumulative_Payoff, plots$EUR_USD$Drawdown, ncol = 2)
+  grid.arrange(plots$EUR_USD$True_vs_Predicted, ncol = 1)
+  
+  grid.arrange(plots$BTC_USD$Continuous_Accuracy, plots$BTC_USD$Accuracy, plots$BTC_USD$Cumulative_Payoff, plots$BTC_USD$Drawdown, ncol = 2)
+  grid.arrange(plots$BTC_USD$True_vs_Predicted, ncol = 1)
+  
+  grid.arrange(plots$BTC_EUR$Continuous_Accuracy, plots$BTC_EUR$Accuracy, plots$BTC_EUR$Cumulative_Payoff, plots$BTC_EUR$Drawdown, ncol = 2)
+  grid.arrange(plots$BTC_EUR$True_vs_Predicted,  ncol = 1)
+  
+  
+  # Print the additional metrics for each asset
+  cat("\n")
+  print(kable(metrics$EUR_USD, caption = "EUR/USD Additional Metrics") %>% kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")))
+  
+  cat("\n")
+  print(kable(metrics$BTC_USD, caption = "BTC/USD Additional Metrics") %>% kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")))
+  
+  cat("\n")
+  print(kable(metrics$BTC_EUR, caption = "BTC/EUR Additional Metrics") %>% kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")))
+}
+
+```
+
+
+
+The results show that the model achieves reasonably high precision and recall across all assets, indicating a balanced performance in predicting upward and downward movements.
+
+Moreover, from the tables we can see that increasing the number of training points to 10,200 improves precision for EUR/USD and BTC/EUR but has a mixed impact on BTC/USD. This suggests that more training data can enhance model accuracy but may also introduce variability in performance across different assets.
+
+A longer deployment window of 9 hours results in the highest precision and F1-Score for BTC/USD and BTC/EUR, indicating better performance in capturing trends over extended periods.
+
+
+Key Takeaways:
+
+The model performs consistently across different configurations, with slight variations in precision and recall.
+Increasing the number of training points can improve model accuracy, though the impact varies by asset.
+Longer deployment windows may enhance performance by capturing more extended trends, but careful on the time window for the sequences as is has to evolve too and fine-tune the model can be time and resources expensive.
+The insights gained from this analysis can inform future model improvements and trading strategies, emphasizing the importance of adaptive and data-driven approaches in financial markets.
+
+This concludes the report on the application of a CNN-LSTM model for predicting price movements in financial markets. The journey through data preprocessing, model training, and backtesting has highlighted the potential and challenges of machine learning in finance.
+
+The notebook would not take that long to run if you run it with a configuration given before, since the models are saved and one has to charge just the .json file. If you wish to run on another parameters it would take in overall more than 15 minutes training on 2000-3000 points for a time window of sequences of 100 in an Intel Core™ i5-1230U 
+
+
+- Results
+The dynamic portfolio backtesting framework was applied to the combined dataset and individual datasets. Key outputs include:
+Density Plot of Normalized Returns: Showing the distribution of normalized returns across all assets.
+Correlation Matrix Heatmap: Visualizing the correlation matrix of daily returns.
+General Market Regimes Plot: Showing cumulative returns and identified regimes for the combined dataset.
+Individual Market Regimes Plots: Showing cumulative returns and identified regimes for each individual dataset.
+Performance Metrics: Evaluating the model's performance in terms of cumulative returns, accuracy, drawdown, and other relevant metrics.
+
+
+# 8. Conclusion
+The CNN-LSTM model provides a robust approach for predicting stock market trends and dynamically managing a portfolio. By combining the feature extraction capabilities of CNNs with the sequence prediction capabilities of LSTMs, we achieve high accuracy and improved performance. Our dynamic portfolio backtesting framework demonstrates the practical applicability of this model in real-world scenarios, highlighting its potential for enhancing financial decision-making.
+
+References
+Aadhitya A, Rajapriya R, Vineetha R S, Anurag M Bagde. "Predicting Stock Market Time-Series Data Using CNN-LSTM Neural Network Model."
+
+LLama3 was used to make RAG so my research was easier (It was whith function calling, internet and RAG that I found such an amazing paper).
+
+Codestral helped me whenever I was stucked in writing or debugging code and I used both LLama3 and Mixtral to henhance my understanding of topics and better explain them to you (along with Wikipedia of course).
+
+References on machine learning: My notes from previous courses in theoretical Machine Learning from my physics bachelor and youtube videos
+
+
+Little disclaimer: You may find throughout the text the use of plural instead of singular since i am used to write reports in a plural way, not a singular one. 
+
+
+Personal comment:
+About two weeks ago, during a rare conversation with an old friend whose path had diverged from mine over the years, we delved into a medley of topics ranging from physics to philosophy, biology to finance. I confessed that I was immersed in a master's in finance, while he shared his newfound fascination with the markets. Amidst words and silences, he introduced me to a broker called IQOption, specializing in binary options. But these weren’t just any options; these were one-minute predictions where you bet on the color of the candles, forecasting the price direction.
+
+I had heard tales of market predictions spanning years of daily data, so why not do it with minute-by-minute data? In the whirlwind of my thoughts, I saw an opportunity to capture the market's pulsating heart, that fleeting beat only revealed in the frenzy of each minute. Greed tempted me, like a furtive lover, and I abandoned the other project proposed by the teacher halfway to embrace this new endeavor: a machine learning model connected to the IQOption API.
+
+Here lies the fruit of that voracious ambition, of sleepless nights, stress, frustrations, and those small, glorious moments of joy that can be depicted in the balance of my paper account in the attached image. If next week's real trading session reflects even a glimmer of these results, it will be just the beginning of a long journey: a relentless pursuit of models that not only feed my mind and wallet but also spark that touch of fun that makes life, amidst numbers and algorithms, spirits and souls, worth living.
+
+As I stand at this crossroads, a machine learning model in hand and a world of uncertainty before me, I can't help but feel like a poet of the market, painting with data and predicting with algorithms. In this R notebook, there is power. The power to predict, the power to profit, and the power to play. But with great power comes great temptation. The lure of greed is always present, whispering promises of easy riches and swift success. 
+
+But I must remember, as Borges wrote, "We are our memory, we are that chimerical museum of shifting shapes, that pile of broken mirrors." This endeavor is not just about the destination, but the journey. It's about the late nights, the quiet victories, the learning, and the growing. It's about finding joy in the process, not just the outcome.
+
+So behold and be aware of the power you and I possess in this R notebook, and do not let yourself be consumed by greed, for I am sure no good comes from two. Let us tread this path with caution, curiosity, and a sense of wonder, for in the end, it is not just about the money we make, but the wisdom we gain and the stories we create. And this, this is just the begging of my book. 
+
+![IQOption paper account](IQOption.png) 
